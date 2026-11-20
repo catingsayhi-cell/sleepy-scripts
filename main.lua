@@ -1,8 +1,7 @@
---[[ Sleepy Enhancements v4 — Rivals (crash-hardened)
-     RightShift — menu
-     Startup is now safe: no CoreGui sweep, lazy ESP/FOV/hitbox,
-     one heartbeat, everything pcall'd, re-run cleanup.
-]]
+--[[ Sleepy Enhancements v6 — Rivals (Bugfixes & Safeguards)
+     RightShift — open menu
+     Fixed: Toggle logic (no wiping other toggles), Sky restore, Drawing crashes, Input binds
+     White theme applied via ThemeManager properly ]]
 
 -- ============================================================
 -- 0. RE-RUN CLEANUP
@@ -13,7 +12,7 @@ end
 _G.SleepyEnhancements = { Connections = {}, RenderBinds = {}, Drawings = {}, Cleanup = nil }
 
 -- ============================================================
--- 1. LIBRARY LOAD (with fallbacks)
+-- 1. LIBRARY LOAD
 -- ============================================================
 local LibSources = {
     "https://raw.githubusercontent.com/ofugii/Unnamed-Linoria/main/",
@@ -50,6 +49,7 @@ local RunService        = game:GetService("RunService")
 local UserInputService  = game:GetService("UserInputService")
 local Workspace         = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Lighting          = game:GetService("Lighting")
 local GuiService        = game:GetService("GuiService")
 local VirtualUser       = game:GetService("VirtualUser")
 
@@ -107,16 +107,45 @@ local Config = {
     Noclip     = false,
     Fly        = false,
     FlySpeed   = 60,
+    -- Performance
+    RemoveTextures = false,
+    RemoveSky      = false,
+    RemoveParticles = false,
+    RemoveShadows  = false,
+    Brightness     = 2,
+    Exposure       = 0,
     -- Throttle
     ESPThrottle    = 1 / 20,
     HitboxThrottle = 1 / 10,
 }
 
-local aimHeld     = false
-local aimBindName = "MB2"
+-- Skybox presets
+local SKYBOXES = {
+    ["Default"] = nil, -- handled separately in logic
+    ["Black Sky"] = {
+        Bk = "rbxassetid://6444884337", Dn = "rbxassetid://6444320592",
+        Ft = "rbxassetid://6444884337", Lf = "rbxassetid://6444884337",
+        Rt = "rbxassetid://6444884337", Up = "rbxassetid://6412503613",
+    },
+    ["Blue Aurora"] = {
+        Bk = "rbxassetid://159454299", Dn = "rbxassetid://159454299",
+        Ft = "rbxassetid://159454299", Lf = "rbxassetid://159454299",
+        Rt = "rbxassetid://159454299", Up = "rbxassetid://159454299",
+    },
+    ["Sunset"] = {
+        Bk = "rbxassetid://15502522797", Dn = "rbxassetid://15502522797",
+        Ft = "rbxassetid://15502524520", Lf = "rbxassetid://15502522129",
+        Rt = "rbxassetid://15502522129", Up = "rbxassetid://15502526102",
+    },
+    ["Nebula"] = {
+        Bk = "rbxassetid://159454299", Dn = "rbxassetid://159454299",
+        Ft = "rbxassetid://159454299", Lf = "rbxassetid://159454299",
+        Rt = "rbxassetid://159454299", Up = "rbxassetid://159454299",
+    },
+}
 
 -- ============================================================
--- 4. HELPERS (pure)
+-- 4. HELPERS
 -- ============================================================
 local function getChar(plr) return plr and plr.Character end
 local function getHum(plr)  local c = getChar(plr); return c and c:FindFirstChildOfClass("Humanoid") end
@@ -135,10 +164,9 @@ end
 local function hasLOS(part)
     if not Config.AimWallCheck then return true end
     if not part or not part.Parent then return false end
-    local origin = Camera.CFrame.Position
     local ok, hit = pcall(function()
         return Workspace:FindPartOnRayWithIgnoreList(
-            Ray.new(origin, part.Position - origin),
+            Ray.new(Camera.CFrame.Position, part.Position - Camera.CFrame.Position),
             { LP.Character, Camera }
         )
     end)
@@ -167,13 +195,127 @@ local function getAimPart(plr, name)
 end
 
 -- ============================================================
--- 5. INPUT
+-- 5. PERFORMANCE FUNCTIONS (Fixed logic)
 -- ============================================================
+local perfState = { Textures = false, Sky = false, Particles = false, Shadows = false, OrigSky = nil }
+
+-- Store original sky on startup
+pcall(function()
+    for _, obj in ipairs(Lighting:GetChildren()) do
+        if obj:IsA("Sky") then perfState.OrigSky = obj:Clone(); break end
+    end
+end)
+
+local function applyPerformance()
+    if Config.RemoveTextures and not perfState.Textures then
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("Decal") or obj:IsA("Texture") then
+                pcall(function() obj.Transparency = 1 end)
+            end
+        end
+        perfState.Textures = true
+    elseif not Config.RemoveTextures and perfState.Textures then
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("Decal") or obj:IsA("Texture") then
+                pcall(function() obj.Transparency = 0 end)
+            end
+        end
+        perfState.Textures = false
+    end
+
+    if Config.RemoveSky and not perfState.Sky then
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("Sky") then pcall(function() obj:Destroy() end) end
+        end
+        perfState.Sky = true
+    elseif not Config.RemoveSky and perfState.Sky then
+        if perfState.OrigSky then
+            pcall(function() perfState.OrigSky:Clone().Parent = Lighting end)
+        else
+            pcall(function() Instance.new("Sky").Parent = Lighting end)
+        end
+        perfState.Sky = false
+    end
+
+    if Config.RemoveParticles and not perfState.Particles then
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("ParticleEmitter") or obj:IsA("Smoke") or obj:IsA("Fire") then
+                pcall(function() obj.Enabled = false end)
+            end
+        end
+        perfState.Particles = true
+    elseif not Config.RemoveParticles and perfState.Particles then
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("ParticleEmitter") or obj:IsA("Smoke") or obj:IsA("Fire") then
+                pcall(function() obj.Enabled = true end)
+            end
+        end
+        perfState.Particles = false
+    end
+
+    if Config.RemoveShadows and not perfState.Shadows then
+        pcall(function()
+            Lighting.GlobalShadows = false
+            Lighting.FogEnd = 1000000
+            Lighting.FogStart = 1000000
+        end)
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("BasePart") then pcall(function() obj.CastShadow = false end) end
+        end
+        perfState.Shadows = true
+    elseif not Config.RemoveShadows and perfState.Shadows then
+        pcall(function()
+            Lighting.GlobalShadows = true
+            Lighting.FogEnd = 100000
+            Lighting.FogStart = 0
+        end)
+        for _, obj in ipairs(Workspace:GetDescendants()) do
+            if obj:IsA("BasePart") then pcall(function() obj.CastShadow = true end) end
+        end
+        perfState.Shadows = false
+    end
+end
+
+local function applyLighting()
+    pcall(function()
+        Lighting.Brightness = Config.Brightness
+        Lighting.ExposureCompensation = Config.Exposure
+    end)
+end
+
+local function setSkybox(name)
+    pcall(function()
+        for _, obj in ipairs(Lighting:GetChildren()) do
+            if obj:IsA("Sky") then obj:Destroy() end
+        end
+        local preset = SKYBOXES[name]
+        if preset then
+            local sky = Instance.new("Sky")
+            sky.SkyboxBk = preset.Bk
+            sky.SkyboxDn = preset.Dn
+            sky.SkyboxFt = preset.Ft
+            sky.SkyboxLf = preset.Lf
+            sky.SkyboxRt = preset.Rt
+            sky.SkyboxUp = preset.Up
+            sky.Parent = Lighting
+        elseif name == "Default" and perfState.OrigSky then
+            perfState.OrigSky:Clone().Parent = Lighting
+        end
+    end)
+end
+
+-- ============================================================
+-- 6. INPUT
+-- ============================================================
+local aimHeld = false
+local aimBindName = "MB2"
+
 local function parseBind(name)
     if name == "MB1" then return Enum.UserInputType.MouseButton1 end
     if name == "MB2" then return Enum.UserInputType.MouseButton2 end
     if name == "MB3" then return Enum.UserInputType.MouseButton3 end
-    if Enum.KeyCode[name] then return Enum.KeyCode[name] end
+    local key = Enum.KeyCode[name] or Enum.KeyCode[name:upper()]
+    if key then return key end
     return Enum.UserInputType.MouseButton2
 end
 
@@ -202,7 +344,7 @@ end)
 table.insert(_G.SleepyEnhancements.Connections, inputEndedConn)
 
 -- ============================================================
--- 6. AIMBOT (BindToRenderStep Camera+1, guarded)
+-- 7. AIMBOT
 -- ============================================================
 local stickyTarget, stickyUntil = nil, 0
 
@@ -226,10 +368,7 @@ local function findAimTarget()
             end
         end
     end
-    if best then
-        stickyTarget = best
-        stickyUntil = tick() + Config.AimSticky
-    end
+    if best then stickyTarget = best; stickyUntil = tick() + Config.AimSticky end
     return bestPart
 end
 
@@ -256,8 +395,6 @@ end
 
 pcall(function()
     RunService:UnbindFromRenderStep("Sleepy_AimCamera")
-end)
-pcall(function()
     RunService:BindToRenderStep("Sleepy_AimCamera", Enum.RenderPriority.Camera.Value + 1, function(dt)
         pcall(aimStep, dt)
     end)
@@ -265,7 +402,7 @@ end)
 table.insert(_G.SleepyEnhancements.RenderBinds, "Sleepy_AimCamera")
 
 -- ============================================================
--- 7. SILENT AIM (defined early for input hook)
+-- 8. SILENT AIM
 -- ============================================================
 function silentFire()
     if not Config.SilentAim then return end
@@ -288,7 +425,7 @@ function silentFire()
 end
 
 -- ============================================================
--- 8. FOV CIRCLE (lazy, guarded)
+-- 9. FOV CIRCLE
 -- ============================================================
 local fovCircle = nil
 local function ensureFOV()
@@ -311,43 +448,35 @@ local function ensureFOV()
 end
 
 -- ============================================================
--- 9. ESP (lazy, guarded)
+-- 10. ESP
 -- ============================================================
 local espCache = {}
 
 local function makeESP(plr)
-    if espCache[plr] then return end
-    if not HAS_DRAWING then return end
+    if espCache[plr] or not HAS_DRAWING then return end
     local e = {}
     local ok = pcall(function()
-        local box = Drawing.new("Square")
-        box.Thickness = 1.5; box.Filled = false; box.Transparency = 1
-        box.Color = Config.ESPColor; box.Visible = false
-        e.box = box
+        e.box = Drawing.new("Square")
+        e.box.Thickness = 1.5; e.box.Filled = false; e.box.Transparency = 1
+        e.box.Color = Config.ESPColor; e.box.Visible = false
 
-        local name = Drawing.new("Text")
-        name.Size = 14; name.Center = true; name.Outline = true
-        name.OutlineColor = Color3.new(0, 0, 0)
-        name.Color = Config.ESPColor; name.Visible = false
-        e.name = name
+        e.name = Drawing.new("Text")
+        e.name.Size = 14; e.name.Center = true; e.name.Outline = true
+        e.name.OutlineColor = Color3.new(0, 0, 0)
+        e.name.Color = Config.ESPColor; e.name.Visible = false
 
-        local hp = Drawing.new("Text")
-        hp.Size = 14; hp.Center = true; hp.Outline = true
-        hp.OutlineColor = Color3.new(0, 0, 0)
-        hp.Color = Color3.new(0, 1, 0); hp.Visible = false
-        e.health = hp
+        e.health = Drawing.new("Text")
+        e.health.Size = 14; e.health.Center = true; e.health.Outline = true
+        e.health.OutlineColor = Color3.new(0, 0, 0)
+        e.health.Color = Color3.new(0, 1, 0); e.health.Visible = false
 
-        local tr = Drawing.new("Line")
-        tr.Thickness = 1.5; tr.Transparency = 1
-        tr.Color = Config.ESPColor; tr.Visible = false
-        e.tracer = tr
+        e.tracer = Drawing.new("Line")
+        e.tracer.Thickness = 1.5; e.tracer.Transparency = 1
+        e.tracer.Color = Config.ESPColor; e.tracer.Visible = false
     end)
     if not ok then return end
     espCache[plr] = e
-    table.insert(_G.SleepyEnhancements.Drawings, e.box)
-    table.insert(_G.SleepyEnhancements.Drawings, e.name)
-    table.insert(_G.SleepyEnhancements.Drawings, e.health)
-    table.insert(_G.SleepyEnhancements.Drawings, e.tracer)
+    for _, d in pairs(e) do table.insert(_G.SleepyEnhancements.Drawings, d) end
 end
 
 local function removeESP(plr)
@@ -362,13 +491,9 @@ local function hideESP(e)
     e.health.Visible = false; e.tracer.Visible = false
 end
 
-local espErrorCount = 0
 local function updateESP()
     if not HAS_DRAWING then return end
-    local wantBox, wantName = Config.ESPBox, Config.ESPName
-    local wantHp, wantTracer = Config.ESPHealth, Config.ESPTracer
-    local active = wantBox or wantName or wantHp or wantTracer
-
+    local active = Config.ESPBox or Config.ESPName or Config.ESPHealth or Config.ESPTracer
     for plr, e in pairs(espCache) do
         if not active or not isAlive(plr) then
             hideESP(e)
@@ -388,21 +513,18 @@ local function updateESP()
                     local team = isTeammate(plr)
                     e.box.Size = Vector2.new(w, h)
                     e.box.Position = Vector2.new(sp.X - w * 0.5, sp.Y)
-                    e.box.Visible = wantBox and not team
+                    e.box.Visible = Config.ESPBox and not team
                     e.name.Text = plr.Name
                     e.name.Position = Vector2.new(sp.X, sp.Y - 16)
-                    e.name.Visible = wantName and not team
+                    e.name.Visible = Config.ESPName and not team
                     e.health.Text = tostring(math.floor(hum.Health))
                     e.health.Position = Vector2.new(sp.X - w * 0.5 - 18, sp.Y)
-                    e.health.Color = Color3.fromRGB(
-                        255 - hum.Health * 2.55,
-                        hum.Health * 2.55, 0
-                    )
-                    e.health.Visible = wantHp and not team
+                    e.health.Color = Color3.fromRGB(255 - hum.Health * 2.55, hum.Health * 2.55, 0)
+                    e.health.Visible = Config.ESPHealth and not team
                     local ctr = viewportCenter()
                     e.tracer.From = Vector2.new(ctr.X, Camera.ViewportSize.Y)
                     e.tracer.To = Vector2.new(sp.X, sp.Y)
-                    e.tracer.Visible = wantTracer and not team
+                    e.tracer.Visible = Config.ESPTracer and not team
                 else
                     hideESP(e)
                 end
@@ -412,7 +534,7 @@ local function updateESP()
 end
 
 -- ============================================================
--- 10. HITBOX (only when enabled, capped work)
+-- 11. HITBOX
 -- ============================================================
 local hitboxCache = setmetatable({}, { __mode = "k" })
 
@@ -437,9 +559,7 @@ local function applyHitbox()
             if c then
                 for _, part in ipairs(c:GetDescendants()) do
                     if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
-                        if not hitboxCache[part] then
-                            hitboxCache[part] = part.Size
-                        end
+                        if not hitboxCache[part] then hitboxCache[part] = part.Size end
                         local want = hitboxCache[part] * scale
                         if part.Size ~= want then
                             pcall(function()
@@ -456,7 +576,7 @@ local function applyHitbox()
 end
 
 -- ============================================================
--- 11. AUTO PARRY
+-- 12. AUTO PARRY
 -- ============================================================
 local parryRemote
 pcall(function()
@@ -488,7 +608,7 @@ local function tryParry()
 end
 
 -- ============================================================
--- 12. RAGEBOT (threaded, stoppable)
+-- 13. RAGEBOT
 -- ============================================================
 local rageThread
 local function startRageBot()
@@ -528,14 +648,11 @@ end
 
 local function stopRageBot()
     Config.RageBot = false
-    if rageThread then
-        pcall(task.cancel, rageThread)
-        rageThread = nil
-    end
+    if rageThread then pcall(task.cancel, rageThread); rageThread = nil end
 end
 
 -- ============================================================
--- 13. SKINCHANGER
+-- 14. SKINCHANGER
 -- ============================================================
 local SKINS = {
     Default = { Material = Enum.Material.SmoothPlastic, Color = Color3.fromRGB(200,200,200) },
@@ -565,7 +682,7 @@ local function applySkin(name)
 end
 
 -- ============================================================
--- 14. SPOOFER (one-time hook)
+-- 15. SPOOFER
 -- ============================================================
 local spoofHooked = false
 local function enableSpoofer()
@@ -586,7 +703,7 @@ local function enableSpoofer()
 end
 
 -- ============================================================
--- 15. NOCLIP (apply once on toggle — not per-frame)
+-- 16. NOCLIP / FLY
 -- ============================================================
 local function applyNoclip()
     local c = getChar(LP)
@@ -598,9 +715,6 @@ local function applyNoclip()
     end
 end
 
--- ============================================================
--- 16. FLY
--- ============================================================
 local flyBodyVel, flyBodyGyro
 local function stopFly()
     if flyBodyVel then pcall(function() flyBodyVel:Destroy() end); flyBodyVel = nil end
@@ -616,7 +730,6 @@ local function startFly()
         flyBodyVel.MaxForce = Vector3.new(1e5, 1e5, 1e5)
         flyBodyVel.Velocity = Vector3.zero
         flyBodyVel.Parent = hrp
-
         flyBodyGyro = Instance.new("BodyGyro")
         flyBodyGyro.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
         flyBodyGyro.CFrame = hrp.CFrame
@@ -633,11 +746,13 @@ local Window = Library:CreateWindow({
 })
 
 local Tabs = {
-    Combat   = Window:AddTab("Combat"),
-    Visuals  = Window:AddTab("Visuals"),
-    Skins    = Window:AddTab("Skins"),
-    Misc     = Window:AddTab("Misc"),
-    Settings = Window:AddTab("Settings"),
+    Combat      = Window:AddTab("Combat"),
+    Visuals     = Window:AddTab("Visuals"),
+    Performance = Window:AddTab("Performance"),
+    Lighting    = Window:AddTab("Lighting"),
+    Skins       = Window:AddTab("Skins"),
+    Misc        = Window:AddTab("Misc"),
+    Settings    = Window:AddTab("Settings"),
 }
 
 -- ---------- COMBAT ----------
@@ -656,24 +771,12 @@ aimGroup:AddColorPicker("AimFOVColor", { Text = "FOV Color", Default = Config.Ai
     if fovCircle then pcall(function() fovCircle.Color = v end) end
 end })
 local aimKeyPicker = aimGroup:AddKeyPicker("AimKey", {
-    Text = "Aim Bind",
-    Default = "MB2",
-    Mode = "Hold",
-    NoUI = false,
-    SyncToggleEvent = false,
+    Text = "Aim Bind", Default = "MB2", Mode = "Hold", NoUI = false, SyncToggleEvent = false,
     Callback = function(v)
-        if type(v) == "table" and v.Value then
-            aimBindName = v.Value
-        elseif type(v) == "string" then
-            aimBindName = v
-        end
+        if type(v) == "table" and v.Value then aimBindName = v.Value
+        elseif type(v) == "string" then aimBindName = v end
     end,
 })
-if aimKeyPicker then
-    pcall(function()
-        if aimKeyPicker.Value then aimBindName = aimKeyPicker.Value end
-    end)
-end
 
 local silentGroup = Tabs.Combat:AddRightGroupbox("Silent Aim")
 silentGroup:AddToggle("SilentAim", { Text = "Silent Aim", Default = Config.SilentAim, Callback = function(v) Config.SilentAim = v end })
@@ -702,9 +805,7 @@ espGroup:AddToggle("ESPTracer", { Text = "Tracer", Default = Config.ESPTracer, C
 espGroup:AddColorPicker("ESPColor", { Text = "ESP Color", Default = Config.ESPColor, Callback = function(v)
     Config.ESPColor = v
     for _, e in pairs(espCache) do
-        pcall(function()
-            e.box.Color = v; e.name.Color = v; e.tracer.Color = v
-        end)
+        pcall(function() e.box.Color = v; e.name.Color = v; e.tracer.Color = v end)
     end
 end })
 
@@ -714,6 +815,53 @@ hitboxGroup:AddToggle("HitboxEnabled", { Text = "Enable", Default = Config.Hitbo
     if not v then restoreAllHitboxes() end
 end })
 hitboxGroup:AddSlider("HitboxSize", { Text = "Size", Min = 2, Max = 20, Default = Config.HitboxSize, Rounding = 1, Callback = function(v) Config.HitboxSize = v end })
+
+-- ---------- PERFORMANCE ----------
+local perfGroup = Tabs.Performance:AddLeftGroupbox("Performance Booster")
+perfGroup:AddToggle("RemoveTextures", { Text = "Remove Textures", Default = Config.RemoveTextures, Callback = function(v)
+    Config.RemoveTextures = v
+    applyPerformance()
+end })
+perfGroup:AddToggle("RemoveSky", { Text = "Remove Sky", Default = Config.RemoveSky, Callback = function(v)
+    Config.RemoveSky = v
+    applyPerformance()
+end })
+perfGroup:AddToggle("RemoveParticles", { Text = "Disable Particles", Default = Config.RemoveParticles, Callback = function(v)
+    Config.RemoveParticles = v
+    applyPerformance()
+end })
+perfGroup:AddToggle("RemoveShadows", { Text = "Disable Shadows", Default = Config.RemoveShadows, Callback = function(v)
+    Config.RemoveShadows = v
+    applyPerformance()
+end })
+perfGroup:AddButton({ Text = "Apply All", Func = function()
+    Config.RemoveTextures = true; Config.RemoveSky = true
+    Config.RemoveParticles = true; Config.RemoveShadows = true
+    applyPerformance()
+end })
+perfGroup:AddButton({ Text = "Reset All", Func = function()
+    Config.RemoveTextures = false; Config.RemoveSky = false
+    Config.RemoveParticles = false; Config.RemoveShadows = false
+    applyPerformance()
+end })
+
+-- ---------- LIGHTING ----------
+local lightGroup = Tabs.Lighting:AddLeftGroupbox("Lighting Settings")
+lightGroup:AddSlider("Brightness", { Text = "Brightness", Min = 0, Max = 5, Default = Config.Brightness, Rounding = 1, Callback = function(v)
+    Config.Brightness = v; applyLighting()
+end })
+lightGroup:AddSlider("Exposure", { Text = "Exposure", Min = -5, Max = 5, Default = Config.Exposure, Rounding = 1, Callback = function(v)
+    Config.Exposure = v; applyLighting()
+end })
+lightGroup:AddButton({ Text = "Apply", Func = function() applyLighting() end })
+
+local skyGroup = Tabs.Lighting:AddRightGroupbox("Skybox Changer")
+skyGroup:AddDropdown("SkySelect", {
+    Text = "Sky Preset",
+    Values = {"Default","Black Sky","Blue Aurora","Sunset","Nebula"},
+    Default = "Default",
+    Callback = function(v) setSkybox(v) end,
+})
 
 -- ---------- SKINS ----------
 local skinGroup = Tabs.Skins:AddLeftGroupbox("Skinchanger")
@@ -747,8 +895,7 @@ moveGroup:AddToggle("AntiAFK", { Text = "Anti-AFK", Default = Config.AntiAFK, Ca
 moveGroup:AddSlider("WalkSpeed", { Text = "WalkSpeed", Min = 16, Max = 200, Default = Config.WalkSpeed, Rounding = 0, Callback = function(v) Config.WalkSpeed = v end })
 moveGroup:AddSlider("JumpPower", { Text = "JumpPower", Min = 50, Max = 300, Default = Config.JumpPower, Rounding = 0, Callback = function(v) Config.JumpPower = v end })
 moveGroup:AddToggle("Noclip", { Text = "Noclip", Default = Config.Noclip, Callback = function(v)
-    Config.Noclip = v
-    applyNoclip()
+    Config.Noclip = v; applyNoclip()
 end })
 moveGroup:AddToggle("Fly", { Text = "Fly", Default = Config.Fly, Callback = function(v)
     Config.Fly = v
@@ -770,7 +917,8 @@ if SaveManager then
         SaveManager:IgnoreThemeSettings()
         SaveManager:SetIgnoreIndexes({
             "MenuToggle","AimBot","SilentAim","RageBot","AutoParry",
-            "HitboxEnabled","Noclip","Fly",
+            "HitboxEnabled","Noclip","Fly","RemoveTextures","RemoveSky",
+            "RemoveParticles","RemoveShadows",
         })
         SaveManager:SetFolder("SleepyEnhancements/Rivals/Configs")
         SaveManager:BuildConfigSection(Tabs.Settings)
@@ -778,7 +926,7 @@ if SaveManager then
 end
 
 -- ============================================================
--- 18. WHITE THEME — ModifyTheme ONLY (no CoreGui sweep!)
+-- 18. WHITE THEME (Safe Apply)
 -- ============================================================
 pcall(function()
     Library:ModifyTheme({
@@ -808,28 +956,26 @@ local function onPlayerRemoving(plr)
     removeESP(plr)
 end
 for _, p in ipairs(Players:GetPlayers()) do onPlayerAdded(p) end
-table.insert(_G.SleepyEnhancements.Connections,
-    Players.PlayerAdded:Connect(onPlayerAdded))
-table.insert(_G.SleepyEnhancements.Connections,
-    Players.PlayerRemoving:Connect(onPlayerRemoving))
+table.insert(_G.SleepyEnhancements.Connections, Players.PlayerAdded:Connect(onPlayerAdded))
+table.insert(_G.SleepyEnhancements.Connections, Players.PlayerRemoving:Connect(onPlayerRemoving))
 
--- reapply noclip/skin on respawn
 local function onCharacterAdded()
     task.wait(0.5)
     if Config.Noclip then applyNoclip() end
     if Config.SkinChanger then applySkin(Config.SelectedSkin) end
     if Config.Fly then startFly() end
+    if Config.RemoveTextures or Config.RemoveSky or Config.RemoveParticles or Config.RemoveShadows then
+        applyPerformance()
+    end
 end
-local charConn = LP.CharacterAdded:Connect(onCharacterAdded)
-table.insert(_G.SleepyEnhancements.Connections, charConn)
+table.insert(_G.SleepyEnhancements.Connections, LP.CharacterAdded:Connect(onCharacterAdded))
 
 -- ============================================================
--- 20. HEARTBEAT (single loop, guarded, throttled)
+-- 20. HEARTBEAT
 -- ============================================================
 local accESP, accHitbox, accParry, accAFK = 0, 0, 0, 0
 
 local hbConn = RunService.Heartbeat:Connect(function(dt)
-    -- movement
     local c = getChar(LP)
     if c then
         local hum = c:FindFirstChildOfClass("Humanoid")
@@ -839,7 +985,6 @@ local hbConn = RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- fly
     if Config.Fly and flyBodyVel then
         local camCF = Camera.CFrame
         local move = Vector3.zero
@@ -854,7 +999,6 @@ local hbConn = RunService.Heartbeat:Connect(function(dt)
         end)
     end
 
-    -- ESP
     accESP = accESP + dt
     if accESP >= Config.ESPThrottle then
         accESP = 0
@@ -862,8 +1006,7 @@ local hbConn = RunService.Heartbeat:Connect(function(dt)
         if Config.AimShowFOV and (Config.AimBot or Config.SilentAim) then
             local c2 = ensureFOV()
             if c2 then
-                local ctr = viewportCenter()
-                c2.Position = ctr
+                c2.Position = viewportCenter()
                 c2.Radius = Config.AimFOV
                 c2.Color = Config.AimFOVColor
                 c2.Visible = true
@@ -873,7 +1016,6 @@ local hbConn = RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- hitbox (only work if enabled)
     if Config.HitboxEnabled then
         accHitbox = accHitbox + dt
         if accHitbox >= Config.HitboxThrottle then
@@ -882,7 +1024,6 @@ local hbConn = RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- parry
     if Config.AutoParry then
         accParry = accParry + dt
         if accParry >= 0.05 then
@@ -891,7 +1032,6 @@ local hbConn = RunService.Heartbeat:Connect(function(dt)
         end
     end
 
-    -- anti-afk
     accAFK = accAFK + dt
     if accAFK >= 60 then
         accAFK = 0
@@ -906,7 +1046,7 @@ end)
 table.insert(_G.SleepyEnhancements.Connections, hbConn)
 
 -- ============================================================
--- 21. CLEANUP HANDLER (for re-runs)
+-- 21. CLEANUP
 -- ============================================================
 _G.SleepyEnhancements.Cleanup = function()
     for _, c in ipairs(_G.SleepyEnhancements.Connections) do pcall(function() c:Disconnect() end) end
@@ -915,15 +1055,25 @@ _G.SleepyEnhancements.Cleanup = function()
     end
     for _, d in ipairs(_G.SleepyEnhancements.Drawings) do pcall(function() d:Remove() end) end
     stopRageBot(); stopFly(); restoreAllHitboxes()
+    Config.RemoveTextures = false; Config.RemoveSky = false
+    Config.RemoveParticles = false; Config.RemoveShadows = false
+    applyPerformance()
     _G.SleepyEnhancements = nil
 end
 
 -- ============================================================
--- 22. AUTOLOAD (deferred, guarded, silent)
+-- 22. AUTOLOAD
 -- ============================================================
 task.defer(function()
     if not SaveManager then return end
     pcall(function() SaveManager:LoadAutoloadConfig() end)
+    task.wait(1)
+    if Config.RemoveTextures or Config.RemoveSky or Config.RemoveParticles or Config.RemoveShadows then
+        applyPerformance()
+    end
+    if Config.Brightness ~= 2 or Config.Exposure ~= 0 then
+        applyLighting()
+    end
 end)
 
 -- ============================================================
@@ -932,7 +1082,7 @@ end)
 pcall(function()
     Library:Notify({
         Title = "Sleepy Enhancements",
-        Content = "Loaded. RightShift — menu.",
+        Content = "v6 loaded. RightShift — menu.",
         Duration = 5,
     })
 end)
